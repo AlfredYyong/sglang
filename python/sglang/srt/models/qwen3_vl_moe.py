@@ -12,18 +12,23 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 # ==============================================================================
-"""Inference-only Qwen3-VL model compatible with HuggingFace weights."""
+"""Inference-only Qwen3-VL-MoE model compatible with HuggingFace weights."""
 import logging
 import re
 from functools import lru_cache
-from typing import Iterable, Optional, Tuple, Union
+from typing import Iterable, List, Optional, Tuple, Union
 
 import torch
 import torch.nn as nn
 
 from sglang.srt.configs.qwen3_vl import Qwen3VLMoeConfig, Qwen3VLMoeTextConfig
+from sglang.srt.distributed import (
+    get_moe_expert_parallel_world_size,
+    get_tensor_model_parallel_rank,
+)
 from sglang.srt.layers.moe.fused_moe_triton.layer import FusedMoE
 from sglang.srt.layers.quantization.base_config import QuantizationConfig
+from sglang.srt.managers.mm_utils import general_mm_embed_routine
 from sglang.srt.model_executor.forward_batch_info import ForwardBatch, PPProxyTensors
 from sglang.srt.model_loader.weight_utils import default_weight_loader
 from sglang.srt.models.qwen3_moe import Qwen3MoeModel
@@ -36,6 +41,8 @@ cached_get_processor = lru_cache(get_processor)
 
 
 class Qwen3MoeLLMModel(Qwen3MoeModel):
+    """Qwen3-VL-MoE language model with EAGLE3 support."""
+
     def __init__(
         self,
         *,
@@ -46,8 +53,25 @@ class Qwen3MoeLLMModel(Qwen3MoeModel):
         super().__init__(config=config, quant_config=quant_config, prefix=prefix)
         self.hidden_size = config.hidden_size
 
+        # For EAGLE3 support: initialize layers_to_capture and capture flag
+        self.capture_aux_hidden_states = False
+        self.layers_to_capture = []
+
+        # Deepstack support - will be initialized by parent model
+        # since config (Qwen3VLMoeTextConfig) doesn't have vision_config
+        self.deepstack_embed_to_decoder_layer = range(0)  # Empty by default
+
     def get_input_embeddings(self) -> nn.Embedding:
         return self.embed_tokens
+
+    def set_eagle3_layers_to_capture(self, layer_ids: List[int]):
+        """Set layers to capture for EAGLE3 speculative decoding.
+
+        Args:
+            layer_ids: List of layer indices to capture auxiliary hidden states.
+        """
+        self.capture_aux_hidden_states = True
+        self.layers_to_capture = layer_ids
 
     def forward(
         self,
@@ -57,7 +81,14 @@ class Qwen3MoeLLMModel(Qwen3MoeModel):
         input_embeds: torch.Tensor = None,
         pp_proxy_tensors: Optional[PPProxyTensors] = None,
         input_deepstack_embeds: Optional[torch.Tensor] = None,
-    ) -> Union[torch.Tensor, PPProxyTensors]:
+    ) -> Union[torch.Tensor, Tuple[torch.Tensor, List[torch.Tensor]], PPProxyTensors]:
+        """Forward pass with EAGLE3 auxiliary hidden states capture support.
+
+        Returns:
+            - hidden_states: Final hidden states after all layers
+            - (hidden_states, aux_hidden_states): If EAGLE3 capture is enabled and layers_to_capture is set
+            - PPProxyTensors: If not last rank in pipeline parallelism
+        """
         if self.pp_group.is_first_rank:
             if input_embeds is None:
                 hidden_states = self.embed_tokens(input_ids)
@@ -69,11 +100,14 @@ class Qwen3MoeLLMModel(Qwen3MoeModel):
             hidden_states = pp_proxy_tensors["hidden_states"]
             residual = pp_proxy_tensors["residual"]
 
+        # EAGLE3: Collect auxiliary hidden states from specified layers
         aux_hidden_states = []
         for layer_idx, layer in enumerate(
             self.layers[self.start_layer : self.end_layer]
         ):
             layer_idx += self.start_layer
+
+            # Capture hidden states BEFORE layer processing for EAGLE3
             if layer_idx in self.layers_to_capture:
                 aux_hidden_states.append(
                     hidden_states + residual if residual is not None else hidden_states
@@ -86,12 +120,13 @@ class Qwen3MoeLLMModel(Qwen3MoeModel):
                 residual,
             )
 
-            # process deepstack
-            if input_deepstack_embeds is not None and layer_idx < 3:
+            # Process deepstack embeddings (vision-language fusion)
+            if (
+                input_deepstack_embeds is not None
+                and layer_idx in self.deepstack_embed_to_decoder_layer
+            ):
                 sep = self.hidden_size * layer_idx
-                hidden_states.add_(
-                    input_deepstack_embeds[:, sep : sep + self.hidden_size]
-                )
+                hidden_states.add_(input_deepstack_embeds[:, sep : sep + self.hidden_size])
 
         if not self.pp_group.is_last_rank:
             return PPProxyTensors(
@@ -101,12 +136,14 @@ class Qwen3MoeLLMModel(Qwen3MoeModel):
                 }
             )
         else:
+            # Final normalization
             if hidden_states.shape[0] != 0:
                 if residual is None:
                     hidden_states = self.norm(hidden_states)
                 else:
                     hidden_states, _ = self.norm(hidden_states, residual)
 
+        # Return with or without auxiliary hidden states
         if len(aux_hidden_states) == 0:
             return hidden_states
 
@@ -120,23 +157,47 @@ def load_fused_expert_weights(
     shard_id: str,
     num_experts: int,
 ):
+    """Load fused MoE expert weights with expert parallel support."""
     param = params_dict[name]
-    # weight_loader = typing.cast(Callable[..., bool], param.weight_loader)
     weight_loader = param.weight_loader
-    # let ep moe layer to gracefully handle expert_ids that do not belong to local moe rank
-    for expert_id in range(num_experts):
-        curr_expert_weight = loaded_weight[expert_id]
-        weight_loader(
-            param,
-            curr_expert_weight,
-            name,
-            shard_id,
-            expert_id,
+
+    ep_rank = get_tensor_model_parallel_rank()
+    ep_size = get_moe_expert_parallel_world_size()
+
+    if ep_size == 1:
+        # No expert parallelism: load all experts
+        for expert_id in range(num_experts):
+            curr_expert_weight = loaded_weight[expert_id]
+            weight_loader(
+                param,
+                curr_expert_weight,
+                name,
+                shard_id,
+                expert_id,
+            )
+    else:
+        # Expert parallelism: load only assigned experts
+        experts_per_ep = num_experts // ep_size
+        start_expert = ep_rank * experts_per_ep
+        end_expert = (
+            (ep_rank + 1) * experts_per_ep if ep_rank != ep_size - 1 else num_experts
         )
+
+        for idx, expert_id in enumerate(range(start_expert, end_expert)):
+            curr_expert_weight = loaded_weight[expert_id]
+            weight_loader(
+                param,
+                curr_expert_weight,
+                name,
+                shard_id,
+                idx,
+            )
     return True
 
 
 class Qwen3VLMoeForConditionalGeneration(Qwen3VLForConditionalGeneration):
+    """Qwen3-VL-MoE multimodal model with EAGLE3 support."""
+
     def __init__(
         self,
         config: Qwen3VLMoeConfig,
@@ -146,6 +207,23 @@ class Qwen3VLMoeForConditionalGeneration(Qwen3VLForConditionalGeneration):
     ):
         super().__init__(config, quant_config, prefix, language_model_cls)
 
+        # For EAGLE3 support: initialize capture flag
+        self.capture_aux_hidden_states = False
+
+        # Initialize deepstack attributes for language model
+        # The parent class passes config.text_config to language_model_cls,
+        # which doesn't have vision_config, so we set it here
+        if hasattr(config, 'vision_config') and hasattr(config.vision_config, 'deepstack_visual_indexes'):
+            self.model.deepstack_embed_to_decoder_layer = range(
+                len(config.vision_config.deepstack_visual_indexes)
+            )
+
+            # Validate start_layer for pipeline parallelism
+            if not self.model.pp_group.is_first_rank:
+                assert self.model.start_layer >= len(
+                    config.vision_config.deepstack_visual_indexes
+                ), "start_layer should be greater than or equal to len(deepstack_visual_indexes)"
+
     # Only allow LoRA on attention projections within text layers for MoE.
     _lora_pattern_moe = re.compile(
         r"^model\.layers\.(\d+)\.self_attn\.(?:qkv_proj|o_proj)$"
@@ -153,6 +231,83 @@ class Qwen3VLMoeForConditionalGeneration(Qwen3VLForConditionalGeneration):
 
     def should_apply_lora(self, module_name: str) -> bool:
         return bool(self._lora_pattern_moe.match(module_name))
+
+    def get_embed_and_head(self):
+        """Get embedding and head weights for EAGLE3 speculative decoding."""
+        return self.model.embed_tokens.weight, self.lm_head.weight
+
+    def forward(
+        self,
+        input_ids: torch.Tensor,
+        positions: torch.Tensor,
+        forward_batch: ForwardBatch,
+        get_embedding: bool = False,
+    ):
+        """Run forward pass for Qwen3-VL-MoE with EAGLE3 support.
+
+        This overrides the parent forward to handle the case where the language model
+        returns a tuple (hidden_states, aux_hidden_states) when EAGLE3 capture is enabled.
+        """
+        if self.is_mrope_enabled:
+            positions = forward_batch.mrope_positions
+
+        if not (
+            forward_batch.forward_mode.is_decode()
+            or not forward_batch.contains_image_inputs()
+        ):
+            if self.is_mrope_enabled:
+                assert positions.ndim == 2 and positions.size(0) == 3, (
+                    "multimodal section rotary embedding requires "
+                    f"(3, seq_len) positions, but got {positions.size()}"
+                )
+
+        hidden_states_or_tuple = general_mm_embed_routine(
+            input_ids=input_ids,
+            forward_batch=forward_batch,
+            language_model=self.model,
+            multimodal_model=self,
+            positions=positions,
+            use_deepstack=self.use_deepstack,
+        )
+
+        # Handle EAGLE3 case: language model may return (hidden_states, aux_hidden_states)
+        aux_hidden_states = None
+        if self.capture_aux_hidden_states and isinstance(hidden_states_or_tuple, tuple):
+            hidden_states, aux_hidden_states = hidden_states_or_tuple
+        else:
+            hidden_states = hidden_states_or_tuple
+
+        if not get_embedding:
+            return self.logits_processor(
+                input_ids, hidden_states, self.lm_head, forward_batch, aux_hidden_states
+            )
+        else:
+            return self.pooler(hidden_states, forward_batch)
+
+    def set_eagle3_layers_to_capture(self, layer_ids: Optional[List[int]] = None):
+        """Set layers to capture for EAGLE3 speculative decoding.
+
+        This method is called by the Runner during initialization to enable EAGLE3.
+        It delegates to the language model which handles the actual capture logic.
+
+        Args:
+            layer_ids: List of layer indices to capture auxiliary hidden states.
+                      These indices should match eagle_config.eagle_aux_hidden_state_layer_ids
+                      from the draft model config. If None, uses default layers.
+        """
+        self.capture_aux_hidden_states = True
+        self.model.capture_aux_hidden_states = True
+
+        if layer_ids is None:
+            # Default strategy: capture from early, middle, and late layers
+            num_layers = self.config.num_hidden_layers
+            default_layers = [2, num_layers // 2, num_layers - 3]
+        else:
+            # Use provided layer indices with +1 offset (matching reference implementation)
+            default_layers = [val + 1 for val in layer_ids]
+
+        self.model.set_eagle3_layers_to_capture(default_layers)
+        logger.info(f"[EAGLE3] Qwen3-VL-MoE capture layers: {default_layers}")
 
     def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):
         stacked_params_mapping = [

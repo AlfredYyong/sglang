@@ -512,6 +512,7 @@ class Qwen3LLMModel(Qwen3Model):
         self.deepstack_embed_to_decoder_layer = range(
             len(config.vision_config.deepstack_visual_indexes)
         )
+        self.layers_to_capture = []
 
     def forward(
         self,
@@ -631,6 +632,9 @@ class Qwen3VLForConditionalGeneration(nn.Module):
         self.num_deepstack_embeddings = len(self.deepstack_visual_indexes)
         self.use_deepstack = {Modality.IMAGE: True, Modality.VIDEO: True}
 
+        # For EAGLE3 support
+        self.capture_aux_hidden_states = False
+
     def separate_deepstack_embeds(self, embedding):
         assert (
             embedding.shape[-1] % (1 + self.num_deepstack_embeddings) == 0
@@ -669,6 +673,22 @@ class Qwen3VLForConditionalGeneration(nn.Module):
 
     def get_input_embeddings(self):
         return self.model.embed_tokens
+
+    def get_embed_and_head(self):
+        return self.model.embed_tokens.weight, self.lm_head.weight
+
+    def set_eagle3_layers_to_capture(self, layer_ids: Optional[List[int]] = None):
+        """Set layers to capture for EAGLE3 speculative decoding."""
+        self.capture_aux_hidden_states = True
+        if layer_ids is None:
+            num_layers = self.config.num_hidden_layers
+            self.model.layers_to_capture = [
+                2,
+                num_layers // 2,
+                num_layers - 3,
+            ]
+        else:
+            self.model.layers_to_capture = [val + 1 for val in layer_ids]
 
     _lora_pattern = re.compile(
         r"^model\.layers\.(\d+)\.(?:self_attn|mlp)\.(?:qkv_proj|o_proj|down_proj|gate_up_proj)$"
@@ -709,7 +729,7 @@ class Qwen3VLForConditionalGeneration(nn.Module):
                     f"(3, seq_len) positions, but got {positions.size()}"
                 )
 
-        hidden_states = general_mm_embed_routine(
+        hidden_states_or_tuple = general_mm_embed_routine(
             input_ids=input_ids,
             forward_batch=forward_batch,
             language_model=self.model,
@@ -718,9 +738,20 @@ class Qwen3VLForConditionalGeneration(nn.Module):
             use_deepstack=self.use_deepstack,
         )
 
+        # Handle EAGLE3 case: language model may return (hidden_states, aux_hidden_states)
+        aux_hidden_states = None
+        if self.capture_aux_hidden_states and isinstance(hidden_states_or_tuple, tuple):
+            hidden_states, aux_hidden_states = hidden_states_or_tuple
+        else:
+            hidden_states = hidden_states_or_tuple
+
         if not get_embedding:
             return self.logits_processor(
-                input_ids, hidden_states, self.lm_head, forward_batch
+                input_ids,
+                hidden_states,
+                self.lm_head,
+                forward_batch,
+                aux_hidden_states=aux_hidden_states,
             )
         else:
             return self.pooler(hidden_states, forward_batch)

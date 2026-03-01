@@ -59,7 +59,7 @@ from sglang.srt.layers.quantization.base_config import QuantizationConfig
 from sglang.srt.layers.radix_attention import RadixAttention
 from sglang.srt.layers.radix_linear_attention import RadixLinearAttention
 from sglang.srt.layers.rotary_embedding import get_rope
-from sglang.srt.layers.utils import get_layer_id
+from sglang.srt.layers.utils import PPMissingLayer, get_layer_id
 from sglang.srt.layers.vocab_parallel_embedding import VocabParallelEmbedding
 from sglang.srt.model_executor.cuda_graph_runner import get_is_capture_mode
 from sglang.srt.model_executor.forward_batch_info import ForwardBatch, PPProxyTensors
@@ -681,6 +681,8 @@ class Qwen3_5ForCausalLM(nn.Module):
                 org_num_embeddings=config.vocab_size,
                 enable_tp=not is_dp_attention_enabled(),
             )
+        else:
+            self.embed_tokens = PPMissingLayer()
 
         # Decoder layers
         def get_layer(idx: int, prefix: str):
@@ -709,6 +711,8 @@ class Qwen3_5ForCausalLM(nn.Module):
         # Final normalization
         if self.pp_group.is_last_rank:
             self.norm = GemmaRMSNorm(config.hidden_size, eps=config.rms_norm_eps)
+        else:
+            self.norm = PPMissingLayer(return_tuple=True)
 
     def get_input_embeddings(self) -> nn.Embedding:
         return self.embed_tokens

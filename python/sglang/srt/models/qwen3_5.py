@@ -59,6 +59,7 @@ from sglang.srt.layers.quantization.base_config import QuantizationConfig
 from sglang.srt.layers.radix_attention import RadixAttention
 from sglang.srt.layers.radix_linear_attention import RadixLinearAttention
 from sglang.srt.layers.rotary_embedding import get_rope
+from sglang.srt.layers.utils import get_layer_id
 from sglang.srt.layers.vocab_parallel_embedding import VocabParallelEmbedding
 from sglang.srt.model_executor.cuda_graph_runner import get_is_capture_mode
 from sglang.srt.model_executor.forward_batch_info import ForwardBatch, PPProxyTensors
@@ -697,9 +698,11 @@ class Qwen3_5ForCausalLM(nn.Module):
                 alt_stream=alt_stream,
             )
 
-        self.layers = make_layers(
+        self.layers, self.start_layer, self.end_layer = make_layers(
             config.num_hidden_layers,
             get_layer,
+            pp_rank=self.pp_group.rank_in_group,
+            pp_size=self.pp_group.world_size,
             prefix=f"{prefix}.layers",
         )
 
@@ -733,7 +736,7 @@ class Qwen3_5ForCausalLM(nn.Module):
             residual = pp_proxy_tensors["residual"]
 
         # Pass through decoder layers
-        for layer_idx in range(len(self.layers)):
+        for layer_idx in range(self.start_layer, self.end_layer):
             layer = self.layers[layer_idx]
             with get_global_expert_distribution_recorder().with_current_layer(
                 layer_idx
@@ -798,6 +801,12 @@ class Qwen3_5ForCausalLM(nn.Module):
             if ".self_attn." in name:
                 name = name.replace(".self_attn", "")
 
+            layer_id = get_layer_id(name)
+            if layer_id is not None and (
+                layer_id < self.start_layer or layer_id >= self.end_layer
+            ):
+                continue
+
             for param_name, weight_name, shard_id in stacked_params_mapping:
                 if weight_name not in name:
                     continue
@@ -809,9 +818,6 @@ class Qwen3_5ForCausalLM(nn.Module):
                 # Skip loading extra bias for GPTQ models.
                 if name.endswith(".bias") and name not in params_dict:
                     continue
-                # Skip layers on other devices.
-                # if is_pp_missing_parameter(name, self):
-                #     continue
                 if name not in params_dict:
                     continue
                 param = params_dict[name]
@@ -918,6 +924,12 @@ class Qwen3_5MoeForCausalLM(Qwen3_5ForCausalLM):
                 name = name.replace(r"model.language_model.", r"model.")
             if ".self_attn." in name:
                 name = name.replace(".self_attn", "")
+
+            layer_id = get_layer_id(name)
+            if layer_id is not None and (
+                layer_id < self.start_layer or layer_id >= self.end_layer
+            ):
+                continue
 
             for param_name, weight_name, shard_id in stacked_params_mapping:
                 if "experts.gate_up_proj" in name or "experts.down_proj" in name:
@@ -1078,6 +1090,17 @@ class Qwen3_5ForConditionalGeneration(Qwen3VLForConditionalGeneration):
             if ".self_attn." in name:
                 name = name.replace(".self_attn", "")
 
+            layer_id = get_layer_id(name)
+            if (
+                layer_id is not None
+                and hasattr(self.model, "start_layer")
+                and (
+                    layer_id < self.model.start_layer
+                    or layer_id >= self.model.end_layer
+                )
+            ):
+                continue
+
             for param_name, weight_name, shard_id in stacked_params_mapping:
                 if weight_name not in name:
                     continue
@@ -1089,9 +1112,6 @@ class Qwen3_5ForConditionalGeneration(Qwen3VLForConditionalGeneration):
                 # Skip loading extra bias for GPTQ models.
                 if name.endswith(".bias") and name not in params_dict:
                     continue
-                # Skip layers on other devices.
-                # if is_pp_missing_parameter(name, self):
-                #     continue
                 if name not in params_dict:
                     continue
                 param = params_dict[name]
@@ -1220,6 +1240,17 @@ class Qwen3_5MoeForConditionalGeneration(Qwen3VLForConditionalGeneration):
                 name = name.replace(r"model.language_model.", r"model.")
             if ".self_attn." in name:
                 name = name.replace(".self_attn", "")
+
+            layer_id = get_layer_id(name)
+            if (
+                layer_id is not None
+                and hasattr(self.model, "start_layer")
+                and (
+                    layer_id < self.model.start_layer
+                    or layer_id >= self.model.end_layer
+                )
+            ):
+                continue
 
             for param_name, weight_name, shard_id in stacked_params_mapping:
                 if name.endswith("experts.gate_up_proj") or name.endswith(

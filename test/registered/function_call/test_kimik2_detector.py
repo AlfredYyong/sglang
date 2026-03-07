@@ -4,11 +4,11 @@ import unittest
 from sglang.srt.entrypoints.openai.protocol import Function, Tool
 from sglang.srt.function_call.kimik2_detector import (
     KimiK2Detector as KimiK2FuncDetector,
+)
+from sglang.srt.function_call.kimik2_detector import (
     _strip_special_tokens,
 )
-from sglang.srt.parser.reasoning_parser import (
-    KimiK2Detector as KimiK2ReasoningDetector,
-)
+from sglang.srt.parser.reasoning_parser import KimiK2Detector as KimiK2ReasoningDetector
 from sglang.test.ci.ci_register import register_cpu_ci
 
 register_cpu_ci(1.0, "default")

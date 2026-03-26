@@ -71,6 +71,19 @@ from sglang.utils import is_in_ci
 
 logger = logging.getLogger(__name__)
 
+
+def json_object_type(value: str) -> Dict[str, Any]:
+    try:
+        parsed = json.loads(value)
+    except json.JSONDecodeError as e:
+        raise argparse.ArgumentTypeError("must be a valid JSON object string") from e
+
+    if not isinstance(parsed, dict):
+        raise argparse.ArgumentTypeError("must be a JSON object")
+
+    return parsed
+
+
 # Define constants
 DEFAULT_UVICORN_ACCESS_LOG_EXCLUDE_PREFIXES = ()
 SAMPLING_BACKEND_CHOICES = {"flashinfer", "pytorch", "ascend"}
@@ -426,6 +439,7 @@ class ServerArgs:
     weight_version: str = "default"
     chat_template: Optional[str] = None
     hf_chat_template_name: Optional[str] = None
+    default_chat_template_kwargs: Optional[Dict[str, Any]] = None
     completion_template: Optional[str] = None
     file_storage_path: str = "sglang_storage"
     enable_cache_report: bool = False
@@ -4378,6 +4392,14 @@ class ServerArgs:
             default=ServerArgs.hf_chat_template_name,
             help="When the HuggingFace tokenizer has multiple chat templates (e.g., 'default', 'tool_use', 'rag'), "
             "specify which named template to use. If not set, the first available template is used.",
+        )
+        parser.add_argument(
+            "--default-chat-template-kwargs",
+            type=json_object_type,
+            default=ServerArgs.default_chat_template_kwargs,
+            help="Default kwargs passed to the chat template renderer. "
+            "Merged with request chat_template_kwargs, with request values taking precedence. "
+            "Example: '{\"enable_thinking\": false}'",
         )
         parser.add_argument(
             "--completion-template",

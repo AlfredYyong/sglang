@@ -37,6 +37,7 @@ class _MockTokenizerManager:
             enable_cache_report=False,
             tool_call_parser="hermes",
             reasoning_parser=None,
+            default_chat_template_kwargs=None,
         )
         # Mock hf_config for _use_dpsk_v32_encoding check
         mock_hf_config = Mock()
@@ -79,6 +80,7 @@ class _MockTemplateManager:
         self.chat_template_name: Optional[str] = "llama-3"
         self.jinja_template_content_format: Optional[str] = None
         self.completion_template_name: Optional[str] = None
+        self.force_reasoning = False
 
 
 class ServingChatTestCase(unittest.TestCase):
@@ -133,6 +135,72 @@ class ServingChatTestCase(unittest.TestCase):
             self.assertIsInstance(adapted, GenerateReqInput)
             self.assertFalse(adapted.stream)
             self.assertEqual(processed, self.basic_req)
+
+    def test_convert_to_internal_request_merges_default_chat_template_kwargs(self):
+        self.tm.server_args.default_chat_template_kwargs = {
+            "enable_thinking": False,
+            "custom_param": "server-default",
+        }
+        self.chat = OpenAIServingChat(self.tm, self.template_manager)
+        request = ChatCompletionRequest(
+            model="x",
+            messages=[{"role": "user", "content": "Hi?"}],
+        )
+
+        with patch.object(self.chat, "_process_messages") as proc_mock:
+            proc_mock.return_value = MessageProcessingResult(
+                "Test prompt",
+                [1, 2, 3],
+                None,
+                None,
+                [],
+                ["</s>"],
+                None,
+            )
+
+            adapted, processed = self.chat._convert_to_internal_request(request)
+
+        self.assertIsInstance(adapted, GenerateReqInput)
+        self.assertEqual(
+            processed.chat_template_kwargs,
+            {"enable_thinking": False, "custom_param": "server-default"},
+        )
+        self.assertFalse(adapted.require_reasoning)
+
+    def test_convert_to_internal_request_request_kwargs_override_defaults(self):
+        self.tm.server_args.default_chat_template_kwargs = {
+            "enable_thinking": False,
+            "custom_param": "server-default",
+        }
+        self.chat = OpenAIServingChat(self.tm, self.template_manager)
+        request = ChatCompletionRequest(
+            model="x",
+            messages=[{"role": "user", "content": "Hi?"}],
+            chat_template_kwargs={
+                "enable_thinking": True,
+                "custom_param": "request-override",
+            },
+        )
+
+        with patch.object(self.chat, "_process_messages") as proc_mock:
+            proc_mock.return_value = MessageProcessingResult(
+                "Test prompt",
+                [1, 2, 3],
+                None,
+                None,
+                [],
+                ["</s>"],
+                None,
+            )
+
+            adapted, processed = self.chat._convert_to_internal_request(request)
+
+        self.assertIsInstance(adapted, GenerateReqInput)
+        self.assertEqual(
+            processed.chat_template_kwargs,
+            {"enable_thinking": True, "custom_param": "request-override"},
+        )
+        self.assertTrue(adapted.require_reasoning)
 
     def test_jinja_uses_openai_tool_schema_first(self):
         """Ensure Jinja chat templates receive OpenAI-shaped tools by default."""

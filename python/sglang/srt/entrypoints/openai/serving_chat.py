@@ -99,6 +99,9 @@ class OpenAIServingChat(OpenAIServingBase):
         self.template_manager = template_manager
         self.tool_call_parser = self.tokenizer_manager.server_args.tool_call_parser
         self.reasoning_parser = self.tokenizer_manager.server_args.reasoning_parser
+        self.default_chat_template_kwargs = (
+            self.tokenizer_manager.server_args.default_chat_template_kwargs or {}
+        )
 
         # Get default sampling parameters from model's generation config
         self.default_sampling_params = (
@@ -243,6 +246,7 @@ class OpenAIServingChat(OpenAIServingBase):
         request: ChatCompletionRequest,
         raw_request: Request = None,
     ) -> tuple[GenerateReqInput, ChatCompletionRequest]:
+        self._merge_default_chat_template_kwargs(request)
         reasoning_effort = (
             request.chat_template_kwargs.pop("reasoning_effort", None)
             if request.chat_template_kwargs
@@ -324,6 +328,13 @@ class OpenAIServingChat(OpenAIServingBase):
         )
 
         return adapted_request, request
+
+    def _merge_default_chat_template_kwargs(
+        self, request: ChatCompletionRequest
+    ) -> None:
+        request_kwargs = request.chat_template_kwargs or {}
+        merged_kwargs = self.default_chat_template_kwargs | request_kwargs
+        request.chat_template_kwargs = merged_kwargs or None
 
     def _process_messages(
         self, request: ChatCompletionRequest, is_multimodal: bool

@@ -33,6 +33,51 @@ class TestPrepareServerArgs(CustomTestCase):
             {"rope_scaling": {"factor": 2.0, "rope_type": "linear"}},
         )
 
+    def test_prepare_server_args_default_chat_template_kwargs(self):
+        server_args = prepare_server_args(
+            [
+                "--model-path",
+                DEFAULT_SMALL_MODEL_NAME_FOR_TEST_QWEN,
+                "--default-chat-template-kwargs",
+                '{"enable_thinking": false, "custom_param": "value"}',
+            ]
+        )
+        self.assertEqual(
+            server_args.default_chat_template_kwargs,
+            {"enable_thinking": False, "custom_param": "value"},
+        )
+
+    def test_prepare_server_args_default_chat_template_kwargs_default_none(self):
+        server_args = prepare_server_args(
+            [
+                "--model-path",
+                DEFAULT_SMALL_MODEL_NAME_FOR_TEST_QWEN,
+            ]
+        )
+        self.assertIsNone(server_args.default_chat_template_kwargs)
+
+    def test_prepare_server_args_default_chat_template_kwargs_invalid_json(self):
+        with self.assertRaises(SystemExit):
+            prepare_server_args(
+                [
+                    "--model-path",
+                    DEFAULT_SMALL_MODEL_NAME_FOR_TEST_QWEN,
+                    "--default-chat-template-kwargs",
+                    "not valid json",
+                ]
+            )
+
+    def test_prepare_server_args_default_chat_template_kwargs_non_object(self):
+        with self.assertRaises(SystemExit):
+            prepare_server_args(
+                [
+                    "--model-path",
+                    DEFAULT_SMALL_MODEL_NAME_FOR_TEST_QWEN,
+                    "--default-chat-template-kwargs",
+                    '["not", "an", "object"]',
+                ]
+            )
+
 
 class TestLoadBalanceMethod(unittest.TestCase):
     def test_non_pd_defaults_to_round_robin(self):

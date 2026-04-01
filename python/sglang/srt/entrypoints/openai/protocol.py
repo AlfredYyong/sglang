@@ -748,6 +748,10 @@ class ChatCompletionRequest(BaseModel):
         """
         Convert request to sampling parameters.
         Priority: user value > model generation_config > OpenAI defaults
+
+        Only explicitly user-provided parameters are included in the returned dict,
+        so that server-level preferred_sampling_params are not silently overridden
+        by protocol-level defaults.
         """
 
         def get_param(param_name: str):
@@ -758,6 +762,9 @@ class ChatCompletionRequest(BaseModel):
                 )
             return value
 
+        # Use model_fields_set to determine which fields the user explicitly provided.
+        user_set = self.model_fields_set
+
         # add per user request
         spaces_between_special_tokens = (
             True
@@ -765,30 +772,49 @@ class ChatCompletionRequest(BaseModel):
             else self.chat_template_kwargs.get("spaces_between_special_tokens", True)
         )
 
+        # Parameters that use get_param() are always included (they have proper fallback).
         sampling_params = {
             "temperature": get_param("temperature"),
-            "max_new_tokens": self.max_completion_tokens or self.max_tokens,
-            "min_new_tokens": self.min_tokens,
-            "stop": stop,
-            "stop_token_ids": self.stop_token_ids,
-            "stop_regex": self.stop_regex,
             "top_p": get_param("top_p"),
             "top_k": get_param("top_k"),
             "min_p": get_param("min_p"),
-            "presence_penalty": self.presence_penalty,
-            "frequency_penalty": self.frequency_penalty,
             "repetition_penalty": get_param("repetition_penalty"),
-            "regex": self.regex,
-            "ebnf": self.ebnf,
-            "n": self.n,
-            "no_stop_trim": self.no_stop_trim,
-            "ignore_eos": self.ignore_eos,
-            "skip_special_tokens": self.skip_special_tokens,
-            "logit_bias": self.logit_bias,
-            "custom_params": self.custom_params,
-            "sampling_seed": self.seed,
-            "spaces_between_special_tokens": spaces_between_special_tokens,
         }
+
+        # stop is always passed from the caller (derived from chat template + request),
+        # so it should always be included.
+        sampling_params["stop"] = stop
+
+        # For max_new_tokens, only include if the user explicitly set max_completion_tokens or max_tokens.
+        max_new_tokens = self.max_completion_tokens or self.max_tokens
+        if max_new_tokens is not None:
+            sampling_params["max_new_tokens"] = max_new_tokens
+
+        # For all other parameters, only include them if the user explicitly provided them
+        # in the request. This prevents protocol-level defaults from overriding
+        # server-level preferred_sampling_params.
+        _optional_fields = {
+            "min_new_tokens": "min_tokens",
+            "stop_token_ids": "stop_token_ids",
+            "stop_regex": "stop_regex",
+            "presence_penalty": "presence_penalty",
+            "frequency_penalty": "frequency_penalty",
+            "regex": "regex",
+            "ebnf": "ebnf",
+            "n": "n",
+            "no_stop_trim": "no_stop_trim",
+            "ignore_eos": "ignore_eos",
+            "skip_special_tokens": "skip_special_tokens",
+            "logit_bias": "logit_bias",
+            "custom_params": "custom_params",
+            "sampling_seed": "seed",
+        }
+        for param_key, field_name in _optional_fields.items():
+            if field_name in user_set:
+                sampling_params[param_key] = getattr(self, field_name)
+
+        if "chat_template_kwargs" in user_set:
+            sampling_params["spaces_between_special_tokens"] = spaces_between_special_tokens
 
         if self.response_format and self.response_format.type == "json_schema":
             sampling_params["json_schema"] = convert_json_schema_to_str(

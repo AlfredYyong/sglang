@@ -138,44 +138,38 @@ class OpenAIServingCompletion(OpenAIServingBase):
         Only explicitly user-provided parameters are included in the returned dict,
         so that server-level preferred_sampling_params are not silently overridden
         by protocol-level defaults.
-
-        Note: CompletionRequest fields that have OpenAI-spec defaults (e.g.,
-        max_tokens=16, temperature=1.0) are always included because they are
-        part of the OpenAI API contract. Only SGLang-extension fields use
-        model_fields_set to determine if the user explicitly set them.
         """
         user_set = request.model_fields_set
 
-        # OpenAI-spec fields: always include (they have spec-defined defaults).
-        sampling_params = {
-            "temperature": request.temperature,
-            "max_new_tokens": request.max_tokens,
-            "stop": request.stop,
-            "top_p": request.top_p,
-            "presence_penalty": request.presence_penalty,
-            "frequency_penalty": request.frequency_penalty,
-            "n": request.n,
-            "logit_bias": request.logit_bias,
-        }
-
-        # SGLang-extension fields: only include if the user explicitly set them.
-        _sglang_fields = {
+        # Map request field names to sampling param keys.
+        # Only include fields that the user explicitly set in the request.
+        _field_to_param = {
+            "temperature": "temperature",
+            "max_tokens": "max_new_tokens",
             "min_tokens": "min_new_tokens",
+            "stop": "stop",
             "stop_token_ids": "stop_token_ids",
             "stop_regex": "stop_regex",
+            "top_p": "top_p",
             "top_k": "top_k",
             "min_p": "min_p",
+            "presence_penalty": "presence_penalty",
+            "frequency_penalty": "frequency_penalty",
             "repetition_penalty": "repetition_penalty",
             "regex": "regex",
             "json_schema": "json_schema",
             "ebnf": "ebnf",
+            "n": "n",
             "no_stop_trim": "no_stop_trim",
             "ignore_eos": "ignore_eos",
             "skip_special_tokens": "skip_special_tokens",
+            "logit_bias": "logit_bias",
             "custom_params": "custom_params",
             "seed": "sampling_seed",
         }
-        for field_name, param_key in _sglang_fields.items():
+
+        sampling_params = {}
+        for field_name, param_key in _field_to_param.items():
             if field_name in user_set:
                 sampling_params[param_key] = getattr(request, field_name)
 

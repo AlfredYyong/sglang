@@ -935,9 +935,14 @@ class TokenizerManager(TokenizerCommunicatorMixin, TokenizerManagerMultiItemMixi
         """Create a tokenized request object from common parameters."""
         # Parse sampling parameters
         # Note: if there are preferred sampling params, we use them if they are not
-        # explicitly passed in sampling_params
+        # explicitly passed in sampling_params.
+        # Filter out None values from request params to prevent them from overriding
+        # preferred params (None means "not set by user").
         if self.preferred_sampling_params:
-            sampling_kwargs = {**self.preferred_sampling_params, **obj.sampling_params}
+            request_params = {
+                k: v for k, v in obj.sampling_params.items() if v is not None
+            }
+            sampling_kwargs = {**self.preferred_sampling_params, **request_params}
         else:
             sampling_kwargs = obj.sampling_params
         sampling_params = self.sampling_params_class(**sampling_kwargs)

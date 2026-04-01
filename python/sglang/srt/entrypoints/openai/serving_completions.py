@@ -132,32 +132,51 @@ class OpenAIServingCompletion(OpenAIServingBase):
         return adapted_request, request
 
     def _build_sampling_params(self, request: CompletionRequest) -> Dict[str, Any]:
-        """Build sampling parameters for the request"""
-        # Start with common parameters
+        """Build sampling parameters for the request.
+
+        Only explicitly user-provided parameters are included in the returned dict,
+        so that server-level preferred_sampling_params are not silently overridden
+        by protocol-level defaults.
+
+        Note: CompletionRequest fields that have OpenAI-spec defaults (e.g.,
+        max_tokens=16, temperature=1.0) are always included because they are
+        part of the OpenAI API contract. Only SGLang-extension fields use
+        model_fields_set to determine if the user explicitly set them.
+        """
+        user_set = request.model_fields_set
+
+        # OpenAI-spec fields: always include (they have spec-defined defaults).
         sampling_params = {
             "temperature": request.temperature,
             "max_new_tokens": request.max_tokens,
-            "min_new_tokens": request.min_tokens,
             "stop": request.stop,
-            "stop_token_ids": request.stop_token_ids,
-            "stop_regex": request.stop_regex,
             "top_p": request.top_p,
-            "top_k": request.top_k,
-            "min_p": request.min_p,
             "presence_penalty": request.presence_penalty,
             "frequency_penalty": request.frequency_penalty,
-            "repetition_penalty": request.repetition_penalty,
-            "regex": request.regex,
-            "json_schema": request.json_schema,
-            "ebnf": request.ebnf,
             "n": request.n,
-            "no_stop_trim": request.no_stop_trim,
-            "ignore_eos": request.ignore_eos,
-            "skip_special_tokens": request.skip_special_tokens,
             "logit_bias": request.logit_bias,
-            "custom_params": request.custom_params,
-            "sampling_seed": request.seed,
         }
+
+        # SGLang-extension fields: only include if the user explicitly set them.
+        _sglang_fields = {
+            "min_tokens": "min_new_tokens",
+            "stop_token_ids": "stop_token_ids",
+            "stop_regex": "stop_regex",
+            "top_k": "top_k",
+            "min_p": "min_p",
+            "repetition_penalty": "repetition_penalty",
+            "regex": "regex",
+            "json_schema": "json_schema",
+            "ebnf": "ebnf",
+            "no_stop_trim": "no_stop_trim",
+            "ignore_eos": "ignore_eos",
+            "skip_special_tokens": "skip_special_tokens",
+            "custom_params": "custom_params",
+            "seed": "sampling_seed",
+        }
+        for field_name, param_key in _sglang_fields.items():
+            if field_name in user_set:
+                sampling_params[param_key] = getattr(request, field_name)
 
         # Handle response_format constraints
         if request.response_format and request.response_format.type == "json_schema":

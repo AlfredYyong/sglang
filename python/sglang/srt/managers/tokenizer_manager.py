@@ -974,6 +974,15 @@ class TokenizerManager(TokenizerCommunicatorMixin, TokenizerManagerScoreMixin):
         # Filter out None values from request params to prevent them from overriding
         # preferred params (None means "not set by user").
         if self.preferred_sampling_params:
+            # Note: this None filter cannot distinguish "field not set" from
+            # "user explicitly sent null". The protocol layer's model_fields_set
+            # check is the primary guard; this is a defense-in-depth layer.
+            filtered = [k for k, v in obj.sampling_params.items() if v is None]
+            if filtered:
+                logger.debug(
+                    "Filtered None-valued params before preferred merge: %s",
+                    filtered,
+                )
             request_params = {
                 k: v for k, v in obj.sampling_params.items() if v is not None
             }

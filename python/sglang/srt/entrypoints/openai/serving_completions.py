@@ -141,8 +141,8 @@ class OpenAIServingCompletion(OpenAIServingBase):
         """
         user_set = request.model_fields_set
 
-        # Map request field names to sampling param keys.
-        # Only include fields that the user explicitly set in the request.
+        # IMPORTANT: When adding new optional sampling fields to CompletionRequest,
+        # add them here to ensure they participate in the preferred_sampling_params mechanism.
         _field_to_param = {
             "temperature": "temperature",
             "max_tokens": "max_new_tokens",
